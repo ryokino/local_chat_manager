@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 
 fn main() {
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 32];
     // 3. クライアントからの接続があるとサーバーはその接続を受け入れて通信を始める
     // 4. サーバはクライアントからもうメッセージが送られないと判断すると接続を終了する
 
