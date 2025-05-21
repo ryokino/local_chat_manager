@@ -28,11 +28,9 @@ fn main() {
         None,
     )
     .expect("failed to create socket");
-    dbg!(&sock);
 
     // アドレスの作成
     let sock_adr = UnixAddr::new(server_address).unwrap();
-    dbg!(&sock_adr);
     //     ソケットをバインドする
     bind(sock.as_raw_fd(), &sock_adr).expect("failed to bind socket");
 
@@ -44,22 +42,29 @@ fn main() {
     loop {
         // クライアントからの接続を受け入れる
         let connection_fd = accept(sock.as_raw_fd()).unwrap(); // ここで connection_fd の方が RawFdに固定されている
-        let peer: UnixAddr = getpeername(connection_fd).unwrap();
-        dbg!(&peer);
+        let peer: UnixAddr = getpeername(connection_fd).expect("failed to get peername");
 
-        println!("connection from {}", peer.path().unwrap().display());
+        if let Some(path) = peer.path() {
+            if path.as_os_str().is_empty() {
+                println!("connection from unnamed peer");
+            } else {
+                println!("connection from {}", path.display());
+            }
+        } else {
+            println!("connection from unknown peer (no path associated)");
+        }
 
         // サーバが新しいデータを待ち続けるための無限ループ
         loop {
             // let data = read(connection_fd, &mut buf).unwrap(); // コンパイルエラー: connection_idがRawFdだから。Fdにしたい
             let data = recv(connection_fd, &mut buf, MsgFlags::empty()).unwrap();
-            let message = String::from_utf8_lossy(&buf);
+
+            let message = String::from_utf8_lossy(&buf[..data]);
 
             println!("Received: {}", message);
 
             if data != 0 {
-                let response = format!("Processing {}", message);
-                dbg!(&response);
+                let response = format!("Processing: {}", message);
                 println!("{}", response);
                 //     バイナリ形式に直してからクライアントに送り返す
                 let bytes = response.as_bytes();
@@ -71,13 +76,21 @@ fn main() {
                     sent += n;
                 }
             } else {
-                println!("no data from {}", peer.path().unwrap().display());
+                if let Some(path) = peer.path() {
+                    if path.as_os_str().is_empty() {
+                        println!("no data from unnamed peer");
+                    } else {
+                        println!("no data from {}", path.display());
+                    }
+                } else {
+                    println!("no data from unknown peer (no path associated)");
+                }
                 break;
             }
         }
         // // 接続がないと判断した場合
         println!("Closing connection");
         close(connection_fd).expect("failed to close connection");
-        break;
+        // break;
     }
 }
