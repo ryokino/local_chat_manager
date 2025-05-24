@@ -1,3 +1,8 @@
+use fake::Fake;
+use fake::faker::company::en::CompanyName;
+use fake::faker::internet::en::SafeEmail;
+use fake::faker::lorem::en::Sentence;
+use fake::faker::name::en::Name;
 use nix::sys::socket::{
     AddressFamily, Backlog, MsgFlags, SockFlag, SockType, UnixAddr, accept, bind, getpeername,
     listen, recv, send, socket,
@@ -7,9 +12,38 @@ use std::fs::remove_file;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
-const BUFFER_SIZE: usize = 128; // バッファサイズを定数として定義
+const BUFFER_SIZE: usize = 128;
 const SERVER_ADDRESS: &str = "/tmp/socket_file";
 const MAX_CONNECTIONS: i32 = 128;
+
+fn generate_fake_response(original_message: &str) -> String {
+    // メッセージの内容に応じて異なるタイプのfakeデータを生成
+    let message_lower = original_message.to_lowercase();
+
+    if message_lower.contains("name") || message_lower.contains("user") {
+        let fake_name: String = Name().fake();
+        let fake_email: String = SafeEmail().fake();
+        format!("Generated user: {} <{}>", fake_name, fake_email)
+    } else if message_lower.contains("company") || message_lower.contains("business") {
+        let fake_company: String = CompanyName().fake();
+        format!("Random company: {}", fake_company)
+    } else if message_lower.contains("quote") || message_lower.contains("text") {
+        let fake_sentence: String = Sentence(3..8).fake();
+        format!("Random quote: \"{}\"", fake_sentence)
+    } else {
+        // デフォルトの場合は複数の情報を組み合わせ
+        let fake_name: String = Name().fake();
+        let fake_company: String = CompanyName().fake();
+        let fake_sentence: String = Sentence(2..5).fake();
+        format!(
+            "Server response for '{}': {} from {} says: \"{}\"",
+            original_message.trim(),
+            fake_name,
+            fake_company,
+            fake_sentence
+        )
+    }
+}
 
 fn handle_client_connection(
     connection_fd: i32,
@@ -47,14 +81,15 @@ fn handle_client_connection(
                     bytes_received
                 );
 
-                // レスポンスの作成と送信
-                let response = format!("Server processed: {}", message.trim());
+                // fake クレートを使用してレスポンスを生成
+                let response = generate_fake_response(message.trim());
+
                 if let Err(e) = send_complete_message(connection_fd, response.as_bytes()) {
                     eprintln!("Failed to send response to {}: {}", peer_info, e);
                     break;
                 }
 
-                println!("Sent response to {}: {}", peer_info, response);
+                println!("Sent fake response to {}: {}", peer_info, response);
             }
             Err(e) => {
                 eprintln!("Error receiving data from {}: {}", peer_info, e);
@@ -95,7 +130,10 @@ fn cleanup_socket_file() {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting TCP server on {}", SERVER_ADDRESS);
+    println!(
+        "Starting TCP server with fake responses on {}",
+        SERVER_ADDRESS
+    );
 
     // 既存のソケットファイルをクリーンアップ
     cleanup_socket_file();
@@ -116,6 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     listen(&server_sock, Backlog::new(MAX_CONNECTIONS)?)?;
 
     println!("Server listening for connections... (Press Ctrl+C to stop)");
+    println!("Try sending messages with keywords: 'name', 'company', 'quote'");
 
     // メインループ: クライアント接続を受け入れる
     loop {
