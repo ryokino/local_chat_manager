@@ -1,81 +1,91 @@
+use nix::sys::socket::sockopt::ReceiveTimeout;
 use nix::sys::socket::{
-    AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, bind, recvfrom, sendto, socket,
+    AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, connect, recv, send, setsockopt, socket,
 };
-use std::fs::remove_file;
+use nix::sys::time::{TimeVal, TimeValLike};
+use nix::unistd::close;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+
+const BUFFER_SIZE: usize = 1024; // バッファサイズを適切に設定
+const SERVER_ADDRESS: &str = "/tmp/socket_file";
+const RECEIVE_TIMEOUT_SECS: i64 = 5; // タイムアウトを少し長めに
 
 fn main() {
-    //     新しいsocketを作成する。
+    // TCP/IPソケットを作成する
     let sock = socket(
         AddressFamily::Unix,
-        SockType::Datagram,
+        SockType::Stream,
         SockFlag::empty(),
         None,
     )
     .expect("failed to create socket");
 
-    //     UNIXソケットで使用するserver_pathを作成する。
-    let client_path = "/tmp/udp_client";
-    if Path::new(client_path).exists() {
-        remove_file(client_path).unwrap();
-    }
-    let client_addr = UnixAddr::new(client_path).unwrap();
+    // 受信タイムアウトの設定
+    let timeout = TimeVal::seconds(RECEIVE_TIMEOUT_SECS);
+    setsockopt(&sock, ReceiveTimeout, &timeout).expect("failed to set receive timeout");
 
-    //     アドレスの紐付け
-    bind(sock.as_raw_fd(), &client_addr).expect("failed to bind socket");
+    // サーバーアドレスの作成
+    let sock_addr = UnixAddr::new(SERVER_ADDRESS).expect("failed to create socket address");
 
-    // サーバーのアドレスを作成する。
-    let server_path = "/tmp/udp_server";
-    let server_addr = UnixAddr::new(server_path).unwrap();
-
-    // メッセージをサーバーに送信する
-    let request_message_str = String::from("Message to send to the server");
-    let request_message_bytes = request_message_str.as_bytes();
-
-    match sendto(
-        sock.as_raw_fd(),
-        &request_message_bytes,
-        &server_addr,
-        MsgFlags::empty(),
-    ) {
-        Ok(send_bytes) => {
-            println!("Successfully sent {} bytes to the server", send_bytes);
-        }
+    // サーバーへの接続
+    println!("Connecting to server at {}", SERVER_ADDRESS);
+    match connect(sock.as_raw_fd(), &sock_addr) {
+        Ok(_) => println!("Successfully connected to server"),
         Err(e) => {
-            eprintln!("Failed to send message: {}", e);
+            eprintln!("Failed to connect to server: {}", e);
+            let _ = close(sock);
             return;
         }
     }
 
-    // サーバーからの受信待機
-    let mut recv_buf = [0u8; 4096];
+    // メッセージの準備と送信
+    let message = "Hello from client! This is a test message.";
+    let message_bytes = message.as_bytes();
 
-    println!("Waiting for a response from the server ...");
+    println!("Sending message: {}", message);
 
-    match recvfrom::<UnixAddr>(sock.as_raw_fd(), &mut recv_buf) {
-        Ok((bytes_received, sender_addr_option)) => {
-            if bytes_received > 0 {
-                let received_message_slice = &recv_buf[..bytes_received];
-
-                if let Ok(message) = str::from_utf8(received_message_slice) {
-                    println!(
-                        "Received {} bytes from {:?}: {}",
-                        bytes_received, sender_addr_option, message,
-                    );
-                } else {
-                    println!("Received empty response from server")
-                }
+    // 完全な送信を保証
+    let mut sent = 0;
+    while sent < message_bytes.len() {
+        match send(sock.as_raw_fd(), &message_bytes[sent..], MsgFlags::empty()) {
+            Ok(0) => {
+                eprintln!("Connection closed by server during send");
+                let _ = close(sock);
+                return;
+            }
+            Ok(n) => {
+                sent += n;
+                println!("Sent {} bytes (total: {}/{})", n, sent, message_bytes.len());
+            }
+            Err(e) => {
+                eprintln!("Failed to send message: {}", e);
+                let _ = close(sock);
+                return;
             }
         }
+    }
+
+    // サーバーからの応答を受信
+    let mut buf = [0u8; BUFFER_SIZE];
+    println!("Waiting for server response...");
+
+    match recv(sock.as_raw_fd(), &mut buf, MsgFlags::empty()) {
+        Ok(0) => {
+            println!("Server closed connection without response");
+        }
+        Ok(bytes_received) => {
+            let response =
+                std::str::from_utf8(&buf[..bytes_received]).unwrap_or("Invalid UTF-8 response");
+            println!("Server response ({} bytes): {}", bytes_received, response);
+        }
         Err(e) => {
-            eprintln!("Failed to receive message: {}", e);
+            eprintln!("Failed to receive response: {}", e);
         }
     }
 
-    if Path::new(client_path).exists() {
-        let _ = remove_file(client_path);
+    // 接続のクローズ
+    match close(sock) {
+        Ok(_) => println!("Connection closed successfully"),
+        Err(e) => eprintln!("Error closing connection: {}", e),
     }
-
-    println!("Client finished");
 }
