@@ -1,83 +1,154 @@
 use nix::sys::socket::{
-    accept, bind, getpeername, listen, recv, send, socket, AddressFamily, Backlog,
-    MsgFlags, SockFlag, SockType, UnixAddr,
+    AddressFamily, Backlog, MsgFlags, SockFlag, SockType, UnixAddr, accept, bind, getpeername,
+    listen, recv, send, socket,
 };
 use nix::unistd::close;
 use std::fs::remove_file;
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
-fn main() {
-    let mut buf = [0u8; 32];
-    // 3. クライアントからの接続があるとサーバーはその接続を受け入れて通信を始める
-    // 4. サーバはクライアントからもうメッセージが送られないと判断すると接続を終了する
+const BUFFER_SIZE: usize = 128; // バッファサイズを定数として定義
+const SERVER_ADDRESS: &str = "/tmp/socket_file";
+const MAX_CONNECTIONS: i32 = 128;
 
-    // server_addressは UNIXソケットで通信をする際の出入り口となっている。
-    let server_address = "/tmp/socket_file";
+fn handle_client_connection(
+    connection_fd: i32,
+    peer_addr: UnixAddr,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut buf = [0u8; BUFFER_SIZE];
 
-    // 前に同じソケットが残っていたら以下でbindする(窓口を設定する)ことができないのでそれを削除する
-    if Path::new(server_address).exists() {
-        remove_file(server_address).unwrap();
+    // ピア情報の表示を関数化
+    let peer_info = match peer_addr.path() {
+        Some(path) if path.as_os_str().is_empty() => "unnamed peer".to_string(),
+        Some(path) => format!("peer {}", path.display()),
+        None => "unknown peer (no path)".to_string(),
+    };
+
+    println!("Handling connection from {}", peer_info);
+
+    // クライアントからのデータを継続的に受信
+    loop {
+        // バッファをクリア
+        buf.fill(0);
+
+        match recv(connection_fd, &mut buf, MsgFlags::empty()) {
+            Ok(0) => {
+                // データサイズが0 = 接続終了
+                println!("Client {} disconnected normally", peer_info);
+                break;
+            }
+            Ok(bytes_received) => {
+                // データを受信した場合
+                let message = String::from_utf8_lossy(&buf[..bytes_received]);
+                println!(
+                    "Received from {}: {} ({} bytes)",
+                    peer_info,
+                    message.trim(),
+                    bytes_received
+                );
+
+                // レスポンスの作成と送信
+                let response = format!("Server processed: {}", message.trim());
+                if let Err(e) = send_complete_message(connection_fd, response.as_bytes()) {
+                    eprintln!("Failed to send response to {}: {}", peer_info, e);
+                    break;
+                }
+
+                println!("Sent response to {}: {}", peer_info, response);
+            }
+            Err(e) => {
+                eprintln!("Error receiving data from {}: {}", peer_info, e);
+                break;
+            }
+        }
     }
 
-    // UNIXソケットの作成 (https://docs.rs/nix/latest/nix/sys/socket/fn.socket.html)
-    let sock = socket(
+    Ok(())
+}
+
+fn send_complete_message(fd: i32, message: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut sent = 0;
+
+    while sent < message.len() {
+        match send(fd, &message[sent..], MsgFlags::empty()) {
+            Ok(0) => {
+                return Err("Connection closed by peer during send".into());
+            }
+            Ok(n) => {
+                sent += n;
+            }
+            Err(e) => {
+                return Err(format!("Send error: {}", e).into());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cleanup_socket_file() {
+    if Path::new(SERVER_ADDRESS).exists() {
+        if let Err(e) = remove_file(SERVER_ADDRESS) {
+            eprintln!("Warning: Failed to remove existing socket file: {}", e);
+        }
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting TCP server on {}", SERVER_ADDRESS);
+
+    // 既存のソケットファイルをクリーンアップ
+    cleanup_socket_file();
+
+    // UNIXソケットの作成
+    let server_sock = socket(
         AddressFamily::Unix,
         SockType::Stream,
         SockFlag::empty(),
         None,
-    )
-    .expect("failed to create socket");
-    dbg!(&sock);
+    )?;
 
-    // アドレスの作成
-    let sock_adr = UnixAddr::new(server_address).unwrap();
-    dbg!(&sock_adr);
-    //     ソケットをバインドする
-    bind(sock.as_raw_fd(), &sock_adr).expect("failed to bind socket");
+    // アドレスの作成とバインド
+    let sock_addr = UnixAddr::new(SERVER_ADDRESS)?;
+    bind(server_sock.as_raw_fd(), &sock_addr)?;
 
-    // clientからの接続を listenしている
-    // backlog: 接続リクエストの最大数
-    listen(&sock, Backlog::new(128).unwrap()).expect("failed to listen on socket");
+    // 接続をリッスン
+    listen(&server_sock, Backlog::new(MAX_CONNECTIONS)?)?;
 
-    // 無限ループでクライアントからの接続を待ち続ける
+    println!("Server listening for connections... (Press Ctrl+C to stop)");
+
+    // メインループ: クライアント接続を受け入れる
     loop {
-        // クライアントからの接続を受け入れる
-        let connection_fd = accept(sock.as_raw_fd()).unwrap(); // ここで connection_fd の方が RawFdに固定されている
-        let peer: UnixAddr = getpeername(connection_fd).unwrap();
-        dbg!(&peer);
+        match accept(server_sock.as_raw_fd()) {
+            Ok(connection_fd) => {
+                // クライアントのピア情報を取得
+                match getpeername::<UnixAddr>(connection_fd) {
+                    Ok(peer_addr) => {
+                        println!("New connection accepted");
 
-        println!("connection from {}", peer.path().unwrap().display());
+                        // クライアント接続をハンドル
+                        if let Err(e) = handle_client_connection(connection_fd, peer_addr) {
+                            eprintln!("Error handling client connection: {}", e);
+                        }
 
-        // サーバが新しいデータを待ち続けるための無限ループ
-        loop {
-            // let data = read(connection_fd, &mut buf).unwrap(); // コンパイルエラー: connection_idがRawFdだから。Fdにしたい
-            let data = recv(connection_fd, &mut buf, MsgFlags::empty()).unwrap();
-            let message = String::from_utf8_lossy(&buf);
-
-            println!("Received: {}", message);
-
-            if data != 0 {
-                let response = format!("Processing {}", message);
-                dbg!(&response);
-                println!("{}", response);
-                //     バイナリ形式に直してからクライアントに送り返す
-                let bytes = response.as_bytes();
-
-                let mut sent = 0;
-                while sent < bytes.len() {
-                    let n = send(connection_fd, &bytes[sent..], MsgFlags::empty())
-                        .expect("failed to send message");
-                    sent += n;
+                        // 接続を閉じる
+                        if let Err(e) = close(connection_fd) {
+                            eprintln!("Error closing connection: {}", e);
+                        } else {
+                            println!("Connection closed successfully");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to get peer name: {}", e);
+                        let _ = close(connection_fd);
+                    }
                 }
-            } else {
-                println!("no data from {}", peer.path().unwrap().display());
-                break;
+            }
+            Err(e) => {
+                eprintln!("Failed to accept connection: {}", e);
+                // 一時的なエラーの場合は続行
+                continue;
             }
         }
-        // // 接続がないと判断した場合
-        println!("Closing connection");
-        close(connection_fd).expect("failed to close connection");
-        break;
     }
 }

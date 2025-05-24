@@ -1,6 +1,6 @@
 use nix::sys::socket::sockopt::ReceiveTimeout;
 use nix::sys::socket::{
-    connect, recv, send, setsockopt, socket, AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr,
+    AddressFamily, MsgFlags, SockFlag, SockType, UnixAddr, connect, recv, send, setsockopt, socket,
 };
 use nix::sys::time::{TimeVal, TimeValLike};
 use nix::unistd::close;
@@ -28,7 +28,7 @@ fn main() {
     connect(sock.as_raw_fd(), &sock_adr).expect("failed to connect socket 😢");
 
     // メッセージの送信
-    let message_as_bytes = b"Sending a message to the server";
+    let message_as_bytes = b"Hello from client!!!!";
     send(sock.as_raw_fd(), message_as_bytes, MsgFlags::empty())
         .expect("failed to send message to server");
 
